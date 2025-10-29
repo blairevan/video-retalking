@@ -270,8 +270,20 @@ def main():
     
     if not os.path.isdir(os.path.dirname(args.outfile)):
         os.makedirs(os.path.dirname(args.outfile), exist_ok=True)
-    command = 'ffmpeg -loglevel error -y -i {} -i {} -strict -2 -q:v 1 {}'.format(args.audio, 'temp/{}/result.mp4'.format(args.tmp_dir), args.outfile)
+    
+    # 首先合成带音频的视频
+    temp_output = 'temp/{}/temp_output.mp4'.format(args.tmp_dir)
+    command = 'ffmpeg -loglevel error -y -i {} -i {} -strict -2 -q:v 1 {}'.format(args.audio, 'temp/{}/result.mp4'.format(args.tmp_dir), temp_output)
     subprocess.call(command, shell=platform.system() != 'Windows')
+    
+    # 然后进行转码以确保浏览器兼容性
+    command = 'ffmpeg -i {} -c:v libx264 -crf 18 -c:a aac -b:a 128k -movflags +faststart {}'.format(temp_output, args.outfile)
+    subprocess.call(command, shell=platform.system() != 'Windows')
+    
+    # 清理临时文件
+    if os.path.exists(temp_output):
+        os.remove(temp_output)
+    
     print('outfile:', args.outfile)
 
 
