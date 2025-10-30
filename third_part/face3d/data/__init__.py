@@ -13,7 +13,7 @@ See our template dataset class 'template_dataset.py' for more details.
 import numpy as np
 import importlib
 import torch.utils.data
-from face3d.data.base_dataset import BaseDataset
+from .base_dataset import BaseDataset
 
 
 def find_dataset_using_name(dataset_name):
@@ -34,7 +34,8 @@ def find_dataset_using_name(dataset_name):
             dataset = cls
 
     if dataset is None:
-        raise NotImplementedError("In %s.py, there should be a subclass of BaseDataset with class name that matches %s in lowercase." % (dataset_filename, target_dataset_name))
+        raise NotImplementedError("In %s.py, there should be a subclass of BaseDataset with class name that matches %s in lowercase." % (
+            dataset_filename, target_dataset_name))
 
     return dataset
 
@@ -59,6 +60,7 @@ def create_dataset(opt, rank=0):
     dataset = data_loader.load_data()
     return dataset
 
+
 class CustomDatasetDataLoader():
     """Wrapper class of Dataset class that performs multi-threaded data loading"""
 
@@ -72,21 +74,22 @@ class CustomDatasetDataLoader():
         dataset_class = find_dataset_using_name(opt.dataset_mode)
         self.dataset = dataset_class(opt)
         self.sampler = None
-        print("rank %d %s dataset [%s] was created" % (rank, self.dataset.name, type(self.dataset).__name__))
+        print("rank %d %s dataset [%s] was created" % (
+            rank, self.dataset.name, type(self.dataset).__name__))
         if opt.use_ddp and opt.isTrain:
             world_size = opt.world_size
             self.sampler = torch.utils.data.distributed.DistributedSampler(
-                    self.dataset,
-                    num_replicas=world_size,
-                    rank=rank,
-                    shuffle=not opt.serial_batches
-                )
+                self.dataset,
+                num_replicas=world_size,
+                rank=rank,
+                shuffle=not opt.serial_batches
+            )
             self.dataloader = torch.utils.data.DataLoader(
-                        self.dataset,
-                        sampler=self.sampler,
-                        num_workers=int(opt.num_threads / world_size), 
-                        batch_size=int(opt.batch_size / world_size), 
-                        drop_last=True)
+                self.dataset,
+                sampler=self.sampler,
+                num_workers=int(opt.num_threads / world_size),
+                batch_size=int(opt.batch_size / world_size),
+                drop_last=True)
         else:
             self.dataloader = torch.utils.data.DataLoader(
                 self.dataset,

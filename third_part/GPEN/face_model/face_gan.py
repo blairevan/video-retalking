@@ -10,7 +10,8 @@ import numpy as np
 from torch import nn
 import torch.nn.functional as F
 from torchvision import transforms, utils
-from face_model.gpen_model import FullGenerator
+from .gpen_model import FullGenerator
+
 
 class FaceGAN(object):
     def __init__(self, base_dir='./', size=512, model=None, channel_multiplier=2, narrow=1, is_norm=True, device='cuda'):
@@ -22,8 +23,10 @@ class FaceGAN(object):
         self.load_model(channel_multiplier, narrow)
 
     def load_model(self, channel_multiplier=2, narrow=1):
-        self.model = FullGenerator(self.resolution, 512, self.n_mlp, channel_multiplier, narrow=narrow, device=self.device)
-        pretrained_dict = torch.load(self.mfile, map_location=torch.device('cpu'))
+        self.model = FullGenerator(
+            self.resolution, 512, self.n_mlp, channel_multiplier, narrow=narrow, device=self.device)
+        pretrained_dict = torch.load(
+            self.mfile, map_location=torch.device('cpu'))
         self.model.load_state_dict(pretrained_dict)
         self.model.to(self.device)
         self.model.eval()
@@ -43,13 +46,13 @@ class FaceGAN(object):
         img_t = torch.from_numpy(img).to(self.device)/255.
         if self.is_norm:
             img_t = (img_t - 0.5) / 0.5
-        img_t = img_t.permute(2, 0, 1).unsqueeze(0).flip(1) # BGR->RGB
+        img_t = img_t.permute(2, 0, 1).unsqueeze(0).flip(1)  # BGR->RGB
         return img_t
 
     def tensor2img(self, img_t, pmax=255.0, imtype=np.uint8):
         if self.is_norm:
             img_t = img_t * 0.5 + 0.5
-        img_t = img_t.squeeze(0).permute(1, 2, 0).flip(2) # RGB->BGR
+        img_t = img_t.squeeze(0).permute(1, 2, 0).flip(2)  # RGB->BGR
         img_np = np.clip(img_t.float().cpu().numpy(), 0, 1) * pmax
 
         return img_np.astype(imtype)

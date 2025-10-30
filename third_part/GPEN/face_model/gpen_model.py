@@ -13,7 +13,8 @@ from torch import nn
 from torch.nn import functional as F
 from torch.autograd import Function
 
-from face_model.op import FusedLeakyReLU, fused_leaky_relu, upfirdn2d
+from .op import FusedLeakyReLU, fused_leaky_relu, upfirdn2d
+
 
 class PixelNorm(nn.Module):
     def __init__(self):
@@ -51,7 +52,8 @@ class Upsample(nn.Module):
         self.device = device
 
     def forward(self, input):
-        out = upfirdn2d(input, self.kernel, up=self.factor, down=1, pad=self.pad, device=self.device)
+        out = upfirdn2d(input, self.kernel, up=self.factor,
+                        down=1, pad=self.pad, device=self.device)
 
         return out
 
@@ -73,7 +75,8 @@ class Downsample(nn.Module):
         self.device = device
 
     def forward(self, input):
-        out = upfirdn2d(input, self.kernel, up=1, down=self.factor, pad=self.pad, device=self.device)
+        out = upfirdn2d(input, self.kernel, up=1,
+                        down=self.factor, pad=self.pad, device=self.device)
 
         return out
 
@@ -159,10 +162,12 @@ class EqualLinear(nn.Module):
     def forward(self, input):
         if self.activation:
             out = F.linear(input, self.weight * self.scale)
-            out = fused_leaky_relu(out, self.bias * self.lr_mul, device=self.device)
+            out = fused_leaky_relu(
+                out, self.bias * self.lr_mul, device=self.device)
 
         else:
-            out = F.linear(input, self.weight * self.scale, bias=self.bias * self.lr_mul)
+            out = F.linear(input, self.weight * self.scale,
+                           bias=self.bias * self.lr_mul)
 
         return out
 
@@ -212,7 +217,8 @@ class ModulatedConv2d(nn.Module):
             pad0 = (p + 1) // 2 + factor - 1
             pad1 = p // 2 + 1
 
-            self.blur = Blur(blur_kernel, pad=(pad0, pad1), upsample_factor=factor, device=device)
+            self.blur = Blur(blur_kernel, pad=(pad0, pad1),
+                             upsample_factor=factor, device=device)
 
         if downsample:
             factor = 2
@@ -262,7 +268,8 @@ class ModulatedConv2d(nn.Module):
             weight = weight.transpose(1, 2).reshape(
                 batch * in_channel, self.out_channel, self.kernel_size, self.kernel_size
             )
-            out = F.conv_transpose2d(input, weight, padding=0, stride=2, groups=batch)
+            out = F.conv_transpose2d(
+                input, weight, padding=0, stride=2, groups=batch)
             _, _, height, width = out.shape
             out = out.view(batch, self.out_channel, height, width)
             out = self.blur(out)
@@ -342,10 +349,11 @@ class StyledConv(nn.Module):
         )
 
         self.noise = NoiseInjection(isconcat)
-        #self.bias = nn.Parameter(torch.zeros(1, out_channel, 1, 1))
-        #self.activate = ScaledLeakyReLU(0.2)
+        # self.bias = nn.Parameter(torch.zeros(1, out_channel, 1, 1))
+        # self.activate = ScaledLeakyReLU(0.2)
         feat_multiplier = 2 if isconcat else 1
-        self.activate = FusedLeakyReLU(out_channel*feat_multiplier, device=device)
+        self.activate = FusedLeakyReLU(
+            out_channel*feat_multiplier, device=device)
 
     def forward(self, input, style, noise=None):
         out = self.conv(input, style)
@@ -363,7 +371,8 @@ class ToRGB(nn.Module):
         if upsample:
             self.upsample = Upsample(blur_kernel, device=device)
 
-        self.conv = ModulatedConv2d(in_channel, 3, 1, style_dim, demodulate=False, device=device)
+        self.conv = ModulatedConv2d(
+            in_channel, 3, 1, style_dim, demodulate=False, device=device)
         self.bias = nn.Parameter(torch.zeros(1, 3, 1, 1))
 
     def forward(self, input, style, skip=None):
@@ -376,6 +385,7 @@ class ToRGB(nn.Module):
             out = out + skip
 
         return out
+
 
 class Generator(nn.Module):
     def __init__(
@@ -424,7 +434,8 @@ class Generator(nn.Module):
         self.conv1 = StyledConv(
             self.channels[4], self.channels[4], 3, style_dim, blur_kernel=blur_kernel, isconcat=isconcat, device=device
         )
-        self.to_rgb1 = ToRGB(self.channels[4]*self.feat_multiplier, style_dim, upsample=False, device=device)
+        self.to_rgb1 = ToRGB(
+            self.channels[4]*self.feat_multiplier, style_dim, upsample=False, device=device)
 
         self.log_size = int(math.log(size, 2))
 
@@ -456,7 +467,8 @@ class Generator(nn.Module):
                 )
             )
 
-            self.to_rgbs.append(ToRGB(out_channel*self.feat_multiplier, style_dim, device=device))
+            self.to_rgbs.append(
+                ToRGB(out_channel*self.feat_multiplier, style_dim, device=device))
 
             in_channel = out_channel
 
@@ -505,14 +517,16 @@ class Generator(nn.Module):
             batch = styles[0].shape[0]
             for i in range(self.n_mlp + 1):
                 size = 2 ** (i+2)
-                noise.append(torch.randn(batch, self.channels[size], size, size, device=styles[0].device))
-            
+                noise.append(torch.randn(
+                    batch, self.channels[size], size, size, device=styles[0].device))
+
         if truncation < 1:
             style_t = []
 
             for style in styles:
                 style_t.append(
-                    truncation_latent + truncation * (style - truncation_latent)
+                    truncation_latent + truncation *
+                    (style - truncation_latent)
                 )
 
             styles = style_t
@@ -527,7 +541,8 @@ class Generator(nn.Module):
                 inject_index = random.randint(1, self.n_latent - 1)
 
             latent = styles[0].unsqueeze(1).repeat(1, inject_index, 1)
-            latent2 = styles[1].unsqueeze(1).repeat(1, self.n_latent - inject_index, 1)
+            latent2 = styles[1].unsqueeze(1).repeat(
+                1, self.n_latent - inject_index, 1)
 
             latent = torch.cat([latent, latent2], 1)
 
@@ -553,6 +568,7 @@ class Generator(nn.Module):
 
         else:
             return image, None
+
 
 class ConvLayer(nn.Sequential):
     def __init__(
@@ -609,7 +625,8 @@ class ResBlock(nn.Module):
         super().__init__()
 
         self.conv1 = ConvLayer(in_channel, in_channel, 3, device=device)
-        self.conv2 = ConvLayer(in_channel, out_channel, 3, downsample=True, device=device)
+        self.conv2 = ConvLayer(in_channel, out_channel,
+                               3, downsample=True, device=device)
 
         self.skip = ConvLayer(
             in_channel, out_channel, 1, downsample=True, activate=False, bias=False
@@ -623,6 +640,7 @@ class ResBlock(nn.Module):
         out = (out + skip) / math.sqrt(2)
 
         return out
+
 
 class FullGenerator(nn.Module):
     def __init__(
@@ -651,40 +669,46 @@ class FullGenerator(nn.Module):
         }
 
         self.log_size = int(math.log(size, 2))
-        self.generator = Generator(size, style_dim, n_mlp, channel_multiplier=channel_multiplier, blur_kernel=blur_kernel, lr_mlp=lr_mlp, isconcat=isconcat, narrow=narrow, device=device)
-        
+        self.generator = Generator(size, style_dim, n_mlp, channel_multiplier=channel_multiplier,
+                                   blur_kernel=blur_kernel, lr_mlp=lr_mlp, isconcat=isconcat, narrow=narrow, device=device)
+
         conv = [ConvLayer(3, channels[size], 1, device=device)]
         self.ecd0 = nn.Sequential(*conv)
         in_channel = channels[size]
 
-        self.names = ['ecd%d'%i for i in range(self.log_size-1)]
+        self.names = ['ecd%d' % i for i in range(self.log_size-1)]
         for i in range(self.log_size, 2, -1):
             out_channel = channels[2 ** (i - 1)]
-            #conv = [ResBlock(in_channel, out_channel, blur_kernel)]
-            conv = [ConvLayer(in_channel, out_channel, 3, downsample=True, device=device)] 
+            # conv = [ResBlock(in_channel, out_channel, blur_kernel)]
+            conv = [ConvLayer(in_channel, out_channel, 3,
+                              downsample=True, device=device)]
             setattr(self, self.names[self.log_size-i+1], nn.Sequential(*conv))
             in_channel = out_channel
-        self.final_linear = nn.Sequential(EqualLinear(channels[4] * 4 * 4, style_dim, activation='fused_lrelu', device=device))
+        self.final_linear = nn.Sequential(EqualLinear(
+            channels[4] * 4 * 4, style_dim, activation='fused_lrelu', device=device))
 
     def forward(self,
-        inputs,
-        return_latents=False,
-        inject_index=None,
-        truncation=1,
-        truncation_latent=None,
-        input_is_latent=False,
-    ):
+                inputs,
+                return_latents=False,
+                inject_index=None,
+                truncation=1,
+                truncation_latent=None,
+                input_is_latent=False,
+                ):
         noise = []
         for i in range(self.log_size-1):
             ecd = getattr(self, self.names[i])
             inputs = ecd(inputs)
             noise.append(inputs)
-            
+
         inputs = inputs.view(inputs.shape[0], -1)
         outs = self.final_linear(inputs)
-        noise = list(itertools.chain.from_iterable(itertools.repeat(x, 2) for x in noise))[::-1]
-        outs = self.generator([outs], return_latents, inject_index, truncation, truncation_latent, input_is_latent, noise=noise[1:])
+        noise = list(itertools.chain.from_iterable(
+            itertools.repeat(x, 2) for x in noise))[::-1]
+        outs = self.generator([outs], return_latents, inject_index,
+                              truncation, truncation_latent, input_is_latent, noise=noise[1:])
         return outs
+
 
 class Discriminator(nn.Module):
     def __init__(self, size, channel_multiplier=2, blur_kernel=[1, 3, 3, 1], narrow=1, device='cpu'):
@@ -711,7 +735,8 @@ class Discriminator(nn.Module):
         for i in range(log_size, 2, -1):
             out_channel = channels[2 ** (i - 1)]
 
-            convs.append(ResBlock(in_channel, out_channel, blur_kernel, device=device))
+            convs.append(ResBlock(in_channel, out_channel,
+                         blur_kernel, device=device))
 
             in_channel = out_channel
 
@@ -720,9 +745,11 @@ class Discriminator(nn.Module):
         self.stddev_group = 4
         self.stddev_feat = 1
 
-        self.final_conv = ConvLayer(in_channel + 1, channels[4], 3, device=device)
+        self.final_conv = ConvLayer(
+            in_channel + 1, channels[4], 3, device=device)
         self.final_linear = nn.Sequential(
-            EqualLinear(channels[4] * 4 * 4, channels[4], activation='fused_lrelu', device=device),
+            EqualLinear(channels[4] * 4 * 4, channels[4],
+                        activation='fused_lrelu', device=device),
             EqualLinear(channels[4], 1),
         )
 
