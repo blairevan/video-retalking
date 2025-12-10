@@ -479,7 +479,6 @@ def datagen(frames, mels, full_frames, frames_pil, cox):
     img_batch, mel_batch, frame_batch, coords_batch, ref_batch, full_frame_batch = [
     ], [], [], [], [], []
     base_name = args.face.split('/')[-1]
-    refs = []
     image_size = 256
 
     # original frames
@@ -498,7 +497,15 @@ def datagen(frames, mels, full_frames, frames_pil, cox):
     oy1, oy2, ox1, ox2 = cox
     face_det_results = face_detect(full_frames, args, jaw_correction=True)
 
-    for inverse_transform, crop, full_frame, face_det in zip(inverse_transforms, crops, full_frames, face_det_results):
+    # 【方案3：延迟计算】按需计算ref，不缓存，彻底避免内存累积
+    # 每个ref会被计算约5-6次，但内存使用最低
+    def get_ref(idx):
+        """按需生成ref，不缓存，用完即释放"""
+        inverse_transform = inverse_transforms[idx]
+        crop = crops[idx]
+        full_frame = full_frames[idx]
+        face_det = face_det_results[idx]
+
         imc_pil = paste_image(inverse_transform, crop, Image.fromarray(
             cv2.resize(full_frame[int(oy1):int(oy2), int(ox1):int(ox2)], (256, 256))))
 
@@ -507,12 +514,12 @@ def datagen(frames, mels, full_frames, frames_pil, cox):
             np.array(imc_pil.convert('RGB')), (ox2 - ox1, oy2 - oy1))
         oface, coords = face_det
         y1, y2, x1, x2 = coords
-        refs.append(ff[y1: y2, x1:x2])
+        return ff[y1: y2, x1:x2]  # 直接返回，不缓存
 
     for i, m in enumerate(mels):
         idx = 0 if args.static else i % len(frames)
         frame_to_save = frames[idx].copy()
-        face = refs[idx]
+        face = get_ref(idx)  # 按需获取ref
         oface, coords = face_det_results[idx].copy()
 
         face = cv2.resize(face, (args.img_size, args.img_size))
