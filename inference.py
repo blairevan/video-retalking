@@ -204,7 +204,7 @@ def main():
     torch.cuda.empty_cache()
 
     if not args.audio.endswith('.wav'):
-        command = 'ffmpeg -loglevel error -y -i {} -strict -2 {}'.format(
+        command = '/usr/bin/ffmpeg -loglevel error -y -i {} -strict -2 {}'.format(
             args.audio, 'temp/{}/temp.wav'.format(args.tmp_dir))
         subprocess.call(command, shell=True)
         args.audio = 'temp/{}/temp.wav'.format(args.tmp_dir)
@@ -289,7 +289,12 @@ def main():
 
         pred = pred.cpu().numpy().transpose(0, 2, 3, 1) * 255.
 
+        # 清理显存避免长视频累积OOM
+        del img_batch, mel_batch, img_original, incomplete, reference, low_res
+        if args.up_face != 'original':
+            del cur_gen_faces
         torch.cuda.empty_cache()
+
         for p, f, xf, c in zip(pred, frames, f_frames, coords):
             y1, y2, x1, x2 = c
             p = cv2.resize(p.astype(np.uint8), (x2 - x1, y2 - y1))
@@ -397,21 +402,70 @@ def main():
 
     # 首先合成带音频的视频
     temp_output = 'temp/{}/temp_output.mp4'.format(args.tmp_dir)
-    command = 'ffmpeg -loglevel error -y -i {} -i {} -strict -2 -q:v 1 {}'.format(
+    command = '/usr/bin/ffmpeg -loglevel error -y -i {} -i {} -strict -2 -q:v 1 {}'.format(
         args.audio, 'temp/{}/result.mp4'.format(args.tmp_dir), temp_output)
     subprocess.call(command, shell=platform.system() != 'Windows')
 
-    # 然后进行转码以确保浏览器兼容性，降低CRF值以提高视频质量
-    # CRF值越低，质量越高，文件越大。范围0-51，推荐15-23，默认23
-    # 当前设置 crf=1 为极致无损模式，文件会非常大
-    # 确保输出分辨率与源视频一致（调整为偶数以满足 H.264 要求）
+    # 然后进行转码以确保浏览器兼容性
+    # CRF值：0-51，越低质量越高
+    # 4K推荐: crf=23 (高质量平衡), crf=20 (极高质量), crf=26 (标准质量)
+    # preset: fast(快速低内存) medium(平衡) slow(高质量高内存)
     target_w = frame_w if frame_w % 2 == 0 else frame_w - 1
     target_h = frame_h if frame_h % 2 == 0 else frame_h - 1
+
+    # GPU 编码参数 - 匹配高质量输入
+    # 目标：保持 50-60 Mbps 码率（接近输入的 62.5 Mbps）
+    gpu_preset = 'p5'          # 高质量预设
+    gpu_cq = 15                # 极高质量（CQ越低码率越高）
+    gpu_profile = 'high'       # High profile（更好的压缩）
+    gpu_rc_mode = 'vbr'        # 可变码率模式
+
+    # 根据分辨率设置目标码率（确保足够高）
+    if max(target_w, target_h) >= 2160:  # 4K
+        gpu_bitrate = '50M'    # 50 Mbps 目标码率
+        cpu_crf = 18           # CPU 对应的高质量
+    elif max(target_w, target_h) >= 1080:  # 1080p
+        gpu_bitrate = '15M'    # 15 Mbps
+        cpu_crf = 18
+    else:  # 720p及以下
+        gpu_bitrate = '8M'     # 8 Mbps
+        cpu_crf = 20
+
+    # 尝试使用 GPU 编码（NVIDIA），失败则回退到 CPU
     print(
-        f"[Info] Encoding final video at {target_w}x{target_h} resolution...")
-    command = 'ffmpeg -i {} -c:v libx264 -s {}x{} -crf 1 -preset veryslow -c:a aac -b:a 320k -movflags +faststart {}'.format(
-        temp_output, target_w, target_h, args.outfile)
-    subprocess.call(command, shell=platform.system() != 'Windows')
+        f"[Info] Encoding final video at {target_w}x{target_h} resolution (GPU: preset={gpu_preset} cq={gpu_cq} profile={gpu_profile} bitrate={gpu_bitrate})...")
+
+    # NVIDIA GPU 编码（速度快10-20倍，内存占用低）
+    # 使用 scale_cuda 在 GPU 上缩放（如果需要），比 -s 更高效
+    if target_w != frame_w or target_h != frame_h:
+        # 需要缩放：使用 scale_cuda 在 GPU 上进行
+        gpu_command = '/usr/bin/ffmpeg -hwaccel cuda -hwaccel_output_format cuda -i {} -vf "scale_cuda={}:{}" -c:v h264_nvenc -preset {} -profile:v {} -rc:v {} -cq {} -b:v {} -maxrate {} -bufsize {} -c:a aac -b:a 192k -movflags +faststart {}'.format(
+            temp_output, target_w, target_h, gpu_preset, gpu_profile, gpu_rc_mode, gpu_cq, gpu_bitrate, gpu_bitrate, gpu_bitrate, args.outfile)
+    else:
+        # 不需要缩放：直接编码（最高效）
+        gpu_command = '/usr/bin/ffmpeg -hwaccel cuda -hwaccel_output_format cuda -i {} -c:v h264_nvenc -preset {} -profile:v {} -rc:v {} -cq {} -b:v {} -maxrate {} -bufsize {} -c:a aac -b:a 192k -movflags +faststart {}'.format(
+            temp_output, gpu_preset, gpu_profile, gpu_rc_mode, gpu_cq, gpu_bitrate, gpu_bitrate, gpu_bitrate, args.outfile)
+
+    # CPU 编码（备用方案）
+    if target_w != frame_w or target_h != frame_h:
+        cpu_command = '/usr/bin/ffmpeg -i {} -vf "scale={}:{}" -c:v libx264 -profile:v high -crf {} -preset medium -c:a aac -b:a 192k -movflags +faststart {}'.format(
+            temp_output, target_w, target_h, cpu_crf, args.outfile)
+    else:
+        cpu_command = '/usr/bin/ffmpeg -i {} -c:v libx264 -profile:v high -crf {} -preset medium -c:a aac -b:a 192k -movflags +faststart {}'.format(
+            temp_output, cpu_crf, args.outfile)
+
+    # 打印命令用于调试
+    print(f"[Debug] GPU command: {gpu_command}")
+    print(f"[Debug] CPU command: {cpu_command}")
+
+    # 先尝试 GPU，失败则使用 CPU
+    print("[Info] Trying GPU encoding...")
+    result = subprocess.call(gpu_command, shell=platform.system() != 'Windows')
+    if result != 0:
+        print("[Warning] GPU encoding failed, falling back to CPU encoding...")
+        subprocess.call(cpu_command, shell=platform.system() != 'Windows')
+    else:
+        print("[Info] GPU encoding completed successfully!")
 
     # 清理临时文件
     if os.path.exists(temp_output):
