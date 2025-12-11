@@ -1,4 +1,5 @@
 import warnings
+import gc
 from utils.inference_utils import Laplacian_Pyramid_Blending_with_mask, face_detect, load_model, options, split_coeff, \
     trans_image, transform_semantic, find_crop_norm_ratio, load_face3d_net, exp_aus_dict
 from utils.alignment_stit import crop_faces, calc_alignment_coefficients, paste_image
@@ -34,10 +35,62 @@ warnings.filterwarnings("ignore")
 args = options()
 
 
+def get_gpu_free_memory():
+    """获取 GPU 可用显存（GB）"""
+    if not torch.cuda.is_available():
+        return 0
+    try:
+        result = subprocess.run(
+            ['nvidia-smi', '--query-gpu=memory.free',
+                '--format=csv,noheader,nounits'],
+            capture_output=True, text=True, timeout=5
+        )
+        free_mb = int(result.stdout.strip().split('\n')[0])
+        return free_mb / 1024
+    except Exception:
+        # 备用方案：使用 PyTorch 估算
+        total = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+        reserved = torch.cuda.memory_reserved(0) / (1024**3)
+        return max(0, total - reserved - 1)  # 保守估计，预留1GB
+
+
+def get_optimal_batch_size(default_batch_size=16):
+    """根据可用 GPU 显存自动调整批量大小"""
+    if not torch.cuda.is_available():
+        return default_batch_size
+
+    free_memory = get_gpu_free_memory()
+    total_memory = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+
+    print(
+        f'[Info] GPU Memory: Total={total_memory:.1f}GB, Free={free_memory:.1f}GB')
+
+    # 根据可用显存调整批量大小
+    # LNet 每批次约需要 0.8-1.2GB 显存
+    if free_memory < 2:
+        batch_size = 1
+    elif free_memory < 3:
+        batch_size = 2
+    elif free_memory < 5:
+        batch_size = 4
+    elif free_memory < 8:
+        batch_size = 8
+    else:
+        batch_size = min(default_batch_size, 16)
+
+    print(
+        f'[Info] Auto LNet_batch_size: {batch_size} (free={free_memory:.1f}GB)')
+    return batch_size
+
+
 def main():
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     print('[Info] Using {} for inference.'.format(device))
     os.makedirs(os.path.join('temp', args.tmp_dir), exist_ok=True)
+
+    # 自动调整批量大小以避免 OOM
+    if device == 'cuda':
+        args.LNet_batch_size = get_optimal_batch_size(args.LNet_batch_size)
 
     # 面部增强配置：降低upscale避免过度增强和过亮
     # upscale=1: 标准增强，适合大多数场景
@@ -201,7 +254,11 @@ def main():
     else:
         print('[Step 3] Using saved stabilized video.')
         imgs = np.load('temp/'+base_name+'_stablized.npy')
+        # 使用缓存时也要释放 D_Net
+        del D_Net
+
     torch.cuda.empty_cache()
+    gc.collect()
 
     if not args.audio.endswith('.wav'):
         command = '/usr/bin/ffmpeg -loglevel error -y -i {} -strict -2 {}'.format(
@@ -239,6 +296,25 @@ def main():
 
         # 直接使用原图，不做任何增强
         imgs_enhanced.append(img)
+
+    # ========== 🧹 显存清理：Step 6 前释放不需要的模型 ==========
+    print('[Info] Cleaning up GPU memory before Lip Synthesis...')
+    # 释放 enhancer 和 restorer（占用约 2-3GB 显存）
+    del enhancer
+    del restorer
+    # 释放不再需要的中间变量
+    del frames_pil
+    del imgs
+    # 强制垃圾回收
+    gc.collect()
+    torch.cuda.empty_cache()
+
+    # 显示清理后的显存状态
+    if torch.cuda.is_available():
+        free_mem = get_gpu_free_memory()
+        print(f'[Info] GPU Memory after cleanup: Free={free_mem:.2f}GB')
+    # ========== 显存清理结束 ==========
+
     gen = datagen(imgs_enhanced.copy(), mel_chunks,
                   full_frames, None, (oy1, oy2, ox1, ox2))
 
