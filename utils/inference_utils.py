@@ -14,6 +14,8 @@ from third_part.face3d.models import networks
 import warnings
 warnings.filterwarnings("ignore")
 
+AUTO_FALLBACK_BOX = (100, 5, 1000, 600)
+
 
 def options():
     parser = argparse.ArgumentParser(
@@ -137,6 +139,35 @@ def get_smoothened_boxes(boxes, T):
     return boxes
 
 
+def _normalize_box_for_image(image_shape, box):
+    if box is None or len(box) != 4:
+        return None
+    values = [int(v) for v in box]
+    h, w = image_shape[:2]
+
+    # 标准格式: (top, bottom, left, right)
+    y1, y2, x1, x2 = values
+    if y1 >= 0 and y2 >= 0 and x1 >= 0 and x2 >= 0:
+        ny1 = max(0, min(y1, h))
+        ny2 = max(0, min(y2, h))
+        nx1 = max(0, min(x1, w))
+        nx2 = max(0, min(x2, w))
+        if ny2 - ny1 >= 2 and nx2 - nx1 >= 2:
+            return (ny1, ny2, nx1, nx2)
+
+    # 兼容格式: (top, left, bottom, right)
+    y1, x1, y2, x2 = values
+    if y1 >= 0 and y2 >= 0 and x1 >= 0 and x2 >= 0:
+        ny1 = max(0, min(y1, h))
+        ny2 = max(0, min(y2, h))
+        nx1 = max(0, min(x1, w))
+        nx2 = max(0, min(x2, w))
+        if ny2 - ny1 >= 2 and nx2 - nx1 >= 2:
+            return (ny1, ny2, nx1, nx2)
+
+    return None
+
+
 def face_detect(images, args, jaw_correction=False, detector=None):
     if detector == None:
         device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
@@ -144,12 +175,32 @@ def face_detect(images, args, jaw_correction=False, detector=None):
                                                 flip_input=False, device=device)
 
     batch_size = args.face_det_batch_size
+    box = getattr(args, 'box', None)
+    normalized_box = _normalize_box_for_image(images[0].shape, box) if len(images) > 0 else None
+    explicit_box = normalized_box is not None
+    if explicit_box:
+        print(f'[Info] FaceDet uses --box ROI: {normalized_box}')
+
     while 1:
         predictions = []
         try:
-            for i in tqdm(range(0, len(images), batch_size), desc='FaceDet:'):
-                predictions.extend(detector.get_detections_for_batch(
-                    np.array(images[i:i + batch_size])))
+            if explicit_box:
+                y1, y2, x1, x2 = normalized_box
+                roi_images = [image[y1:y2, x1:x2] for image in images]
+                for i in tqdm(range(0, len(roi_images), batch_size), desc='FaceDet:'):
+                    batch_predictions = detector.get_detections_for_batch(
+                        np.array(roi_images[i:i + batch_size]))
+                    for rect in batch_predictions:
+                        if rect is None:
+                            predictions.append(None)
+                        else:
+                            predictions.append(
+                                [rect[0] + x1, rect[1] + y1, rect[2] + x1, rect[3] + y1]
+                            )
+            else:
+                for i in tqdm(range(0, len(images), batch_size), desc='FaceDet:'):
+                    predictions.extend(detector.get_detections_for_batch(
+                        np.array(images[i:i + batch_size])))
         except RuntimeError:
             if batch_size == 1:
                 raise RuntimeError(
@@ -158,6 +209,26 @@ def face_detect(images, args, jaw_correction=False, detector=None):
             print('Recovering from OOM error; New batch size: {}'.format(batch_size))
             continue
         break
+
+    if explicit_box:
+        # ROI 未检测到时回退全图检测，避免框不准导致整段失败
+        for i, rect in enumerate(predictions):
+            if rect is not None:
+                continue
+            predictions[i] = detector.get_detections_for_batch(np.array([images[i]]))[0]
+    else:
+        # 未显式设置 --box 时，若全图检测失败，则自动尝试兜底 ROI
+        auto_box = _normalize_box_for_image(images[0].shape, AUTO_FALLBACK_BOX) if len(images) > 0 else None
+        if auto_box is not None:
+            miss_indices = [i for i, rect in enumerate(predictions) if rect is None]
+            if len(miss_indices) > 0:
+                print(f'[Info] FaceDet fallback ROI active: {auto_box}, missing={len(miss_indices)}')
+                y1, y2, x1, x2 = auto_box
+                for idx in miss_indices:
+                    roi = images[idx][y1:y2, x1:x2]
+                    fallback = detector.get_detections_for_batch(np.array([roi]))[0]
+                    if fallback is not None:
+                        predictions[idx] = [fallback[0] + x1, fallback[1] + y1, fallback[2] + x1, fallback[3] + y1]
 
     results = []
     pady1, pady2, padx1, padx2 = args.pads if jaw_correction else (0, 20, 0, 0)

@@ -149,8 +149,10 @@ def main():
     if not os.path.isfile('temp/'+base_name+'_landmarks.txt') or args.re_preprocess:
         print('[Step 1] Landmarks Extraction in Video.')
         kp_extractor = KeypointExtractor()
+        if len(args.box) == 4 and min(args.box) >= 0:
+            print(f'[Info] Landmark uses --box ROI: {args.box}')
         lm = kp_extractor.extract_keypoint(
-            frames_pil, './temp/'+base_name+'_landmarks.txt')
+            frames_pil, './temp/'+base_name+'_landmarks.txt', crop_box=args.box)
     else:
         print('[Step 1] Using saved landmarks.')
         lm = np.loadtxt('temp/'+base_name+'_landmarks.txt').astype(np.float32)
@@ -561,7 +563,7 @@ def datagen(frames, mels, full_frames, frames_pil, cox):
     kp_extractor = KeypointExtractor()
     fr_pil = [Image.fromarray(frame) for frame in frames]
     lms = kp_extractor.extract_keypoint(
-        fr_pil, 'temp/'+base_name+'x12_landmarks.txt')
+        fr_pil, 'temp/'+base_name+'x12_landmarks.txt', crop_box=args.box)
     # frames is the croped version of modified face
     frames_pil = [(lm, frame) for frame, lm in zip(fr_pil, lms)]
     crops, orig_images, quads = crop_faces(
