@@ -14,7 +14,7 @@ from torch.multiprocessing import Pool, Process, set_start_method
 
 
 class KeypointExtractor():
-    AUTO_FALLBACK_BOX = (100, 5, 1000, 600)
+    AUTO_FALLBACK_BOX = (10, 610, 100, 1100)
 
     def __init__(self):
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -32,16 +32,6 @@ class KeypointExtractor():
 
         # 标准格式: (top, bottom, left, right)
         top, bottom, left, right = values
-        if top >= 0 and bottom >= 0 and left >= 0 and right >= 0:
-            n_top = max(0, min(top, h))
-            n_bottom = max(0, min(bottom, h))
-            n_left = max(0, min(left, w))
-            n_right = max(0, min(right, w))
-            if n_bottom - n_top >= 2 and n_right - n_left >= 2:
-                return (n_top, n_bottom, n_left, n_right)
-
-        # 兼容格式: (top, left, bottom, right)
-        top, left, bottom, right = values
         if top >= 0 and bottom >= 0 and left >= 0 and right >= 0:
             n_top = max(0, min(top, h))
             n_bottom = max(0, min(bottom, h))

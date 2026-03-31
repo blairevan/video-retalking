@@ -14,7 +14,7 @@ from third_part.face3d.models import networks
 import warnings
 warnings.filterwarnings("ignore")
 
-AUTO_FALLBACK_BOX = (100, 5, 1000, 600)
+AUTO_FALLBACK_BOX = (10, 610, 100, 1100)
 
 
 def options():
@@ -147,16 +147,6 @@ def _normalize_box_for_image(image_shape, box):
 
     # 标准格式: (top, bottom, left, right)
     y1, y2, x1, x2 = values
-    if y1 >= 0 and y2 >= 0 and x1 >= 0 and x2 >= 0:
-        ny1 = max(0, min(y1, h))
-        ny2 = max(0, min(y2, h))
-        nx1 = max(0, min(x1, w))
-        nx2 = max(0, min(x2, w))
-        if ny2 - ny1 >= 2 and nx2 - nx1 >= 2:
-            return (ny1, ny2, nx1, nx2)
-
-    # 兼容格式: (top, left, bottom, right)
-    y1, x1, y2, x2 = values
     if y1 >= 0 and y2 >= 0 and x1 >= 0 and x2 >= 0:
         ny1 = max(0, min(y1, h))
         ny2 = max(0, min(y2, h))

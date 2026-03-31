@@ -131,9 +131,10 @@ def main():
           str(len(full_frames)))
     # face detection & cropping, cropping the first frame as the style of FFHQ
     croper = Croper('checkpoints/shape_predictor_68_face_landmarks.dat')
-    full_frames_RGB = [cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                       for frame in full_frames]
-    full_frames_RGB, crop, quad = croper.crop(full_frames_RGB, xsize=512)
+    full_frames_RGB_raw = [cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                           for frame in full_frames]
+    full_frames_RGB_for_crop = [frame.copy() for frame in full_frames_RGB_raw]
+    full_frames_RGB, crop, quad = croper.crop(full_frames_RGB_for_crop, xsize=512)
 
     clx, cly, crx, cry = crop
     lx, ly, rx, ry = quad
@@ -149,10 +150,20 @@ def main():
     if not os.path.isfile('temp/'+base_name+'_landmarks.txt') or args.re_preprocess:
         print('[Step 1] Landmarks Extraction in Video.')
         kp_extractor = KeypointExtractor()
-        if len(args.box) == 4 and min(args.box) >= 0:
-            print(f'[Info] Landmark uses --box ROI: {args.box}')
         lm = kp_extractor.extract_keypoint(
-            frames_pil, './temp/'+base_name+'_landmarks.txt', crop_box=args.box)
+            frames_pil, './temp/'+base_name+'_landmarks.txt')
+        # FFHQ 固定裁剪对部分视频会在后续帧丢脸；失败时自动回退到原始帧重试。
+        failed_mask = (np.mean(lm, axis=(1, 2)) == -1)
+        failed_count = int(np.sum(failed_mask))
+        if failed_count > 0:
+            print(
+                f'[Warn] Landmark failed on {failed_count}/{len(lm)} cropped frames; retrying with uncropped frames.')
+            full_frames_RGB = full_frames_RGB_raw
+            frames_pil = [Image.fromarray(cv2.resize(frame, (256, 256)))
+                          for frame in full_frames_RGB]
+            lm = kp_extractor.extract_keypoint(
+                frames_pil, './temp/'+base_name+'_landmarks.txt')
+            oy1, oy2, ox1, ox2 = 0, full_frames[0].shape[0], 0, full_frames[0].shape[1]
     else:
         print('[Step 1] Using saved landmarks.')
         lm = np.loadtxt('temp/'+base_name+'_landmarks.txt').astype(np.float32)
@@ -559,11 +570,85 @@ def datagen(frames, mels, full_frames, frames_pil, cox):
     base_name = args.face.split('/')[-1]
     image_size = 256
 
+    def build_default_landmarks(frame):
+        h, w = frame.shape[:2]
+        lm = np.zeros((68, 2), dtype=np.float32)
+
+        # jawline
+        xs = np.linspace(0.22 * w, 0.78 * w, 17)
+        ys = h * (0.76 - 0.08 * np.sin(np.linspace(0, np.pi, 17)))
+        lm[0:17] = np.stack([xs, ys], axis=1)
+        # eyebrows
+        lm[17:22] = np.array(
+            [[0.30*w, 0.30*h], [0.34*w, 0.28*h], [0.39*w, 0.27*h], [0.44*w, 0.28*h], [0.48*w, 0.30*h]],
+            dtype=np.float32
+        )
+        lm[22:27] = np.array(
+            [[0.52*w, 0.30*h], [0.56*w, 0.28*h], [0.61*w, 0.27*h], [0.66*w, 0.28*h], [0.70*w, 0.30*h]],
+            dtype=np.float32
+        )
+        # nose bridge + bottom
+        lm[27:31] = np.array(
+            [[0.50*w, 0.35*h], [0.50*w, 0.42*h], [0.50*w, 0.49*h], [0.50*w, 0.56*h]],
+            dtype=np.float32
+        )
+        lm[31:36] = np.array(
+            [[0.44*w, 0.58*h], [0.47*w, 0.60*h], [0.50*w, 0.61*h], [0.53*w, 0.60*h], [0.56*w, 0.58*h]],
+            dtype=np.float32
+        )
+        # eyes
+        lm[36:42] = np.array(
+            [[0.34*w, 0.39*h], [0.37*w, 0.37*h], [0.41*w, 0.37*h], [0.44*w, 0.39*h], [0.41*w, 0.41*h], [0.37*w, 0.41*h]],
+            dtype=np.float32
+        )
+        lm[42:48] = np.array(
+            [[0.56*w, 0.39*h], [0.59*w, 0.37*h], [0.63*w, 0.37*h], [0.66*w, 0.39*h], [0.63*w, 0.41*h], [0.59*w, 0.41*h]],
+            dtype=np.float32
+        )
+        # mouth
+        lm[48:60] = np.array(
+            [[0.40*w, 0.68*h], [0.44*w, 0.66*h], [0.48*w, 0.65*h], [0.52*w, 0.65*h], [0.56*w, 0.66*h], [0.60*w, 0.68*h],
+             [0.56*w, 0.71*h], [0.52*w, 0.72*h], [0.48*w, 0.72*h], [0.44*w, 0.71*h], [0.40*w, 0.69*h], [0.40*w, 0.68*h]],
+            dtype=np.float32
+        )
+        lm[60:68] = np.array(
+            [[0.45*w, 0.68*h], [0.48*w, 0.67*h], [0.52*w, 0.67*h], [0.55*w, 0.68*h],
+             [0.52*w, 0.70*h], [0.48*w, 0.70*h], [0.45*w, 0.69*h], [0.45*w, 0.68*h]],
+            dtype=np.float32
+        )
+        return lm
+
+    def stabilize_landmarks(raw_lms, ref_frames):
+        lms_fixed = np.asarray(raw_lms, dtype=np.float32)
+        invalid = (np.mean(lms_fixed, axis=(1, 2)) == -1)
+        invalid |= ~np.isfinite(lms_fixed).all(axis=(1, 2))
+        if not np.any(invalid):
+            return lms_fixed
+
+        valid_idx = np.where(~invalid)[0]
+        if len(valid_idx) == 0:
+            default_lm = build_default_landmarks(ref_frames[0])
+            lms_fixed[:] = default_lm
+            print('[Warn] Datagen landmarks all invalid; using default landmarks for all frames.')
+            return lms_fixed
+
+        first = valid_idx[0]
+        lms_fixed[:first] = lms_fixed[first]
+        prev = first
+        for curr in valid_idx[1:]:
+            if curr > prev + 1:
+                lms_fixed[prev + 1:curr] = lms_fixed[prev]
+            prev = curr
+        lms_fixed[prev + 1:] = lms_fixed[prev]
+        print(f'[Warn] Datagen landmarks repaired: {int(np.sum(invalid))}/{len(lms_fixed)} invalid frames.')
+        return lms_fixed
+
     # original frames
     kp_extractor = KeypointExtractor()
     fr_pil = [Image.fromarray(frame) for frame in frames]
     lms = kp_extractor.extract_keypoint(
-        fr_pil, 'temp/'+base_name+'x12_landmarks.txt', crop_box=args.box)
+        fr_pil, 'temp/'+base_name+'x12_landmarks.txt')
+    lms = stabilize_landmarks(lms, frames)
     # frames is the croped version of modified face
     frames_pil = [(lm, frame) for frame, lm in zip(fr_pil, lms)]
     crops, orig_images, quads = crop_faces(
