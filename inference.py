@@ -131,10 +131,8 @@ def main():
           str(len(full_frames)))
     # face detection & cropping, cropping the first frame as the style of FFHQ
     croper = Croper('checkpoints/shape_predictor_68_face_landmarks.dat')
-    full_frames_RGB_raw = [cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                           for frame in full_frames]
-    full_frames_RGB_for_crop = [frame.copy() for frame in full_frames_RGB_raw]
-    full_frames_RGB, crop, quad = croper.crop(full_frames_RGB_for_crop, xsize=512)
+    # 从 BGR 全幅直接裁人脸再转 RGB，避免整段再占一份全分辨率 RGB（与 full_frames 双份全幅峰值）
+    full_frames_RGB, crop, quad = croper.crop_bgr_list(full_frames, xsize=512)
 
     clx, cly, crx, cry = crop
     lx, ly, rx, ry = quad
@@ -158,7 +156,8 @@ def main():
         if failed_count > 0:
             print(
                 f'[Warn] Landmark failed on {failed_count}/{len(lm)} cropped frames; retrying with uncropped frames.')
-            full_frames_RGB = full_frames_RGB_raw
+            full_frames_RGB = [cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                               for frame in full_frames]
             frames_pil = [Image.fromarray(cv2.resize(frame, (256, 256)))
                           for frame in full_frames_RGB]
             lm = kp_extractor.extract_keypoint(
