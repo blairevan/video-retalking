@@ -164,8 +164,9 @@ def _normalize_box_for_image(image_shape, box):
     return None
 
 
-def face_detect(images, args, jaw_correction=False, detector=None):
-    if detector == None:
+def face_detect(images, args, jaw_correction=False, detector=None, coords_only=False):
+    """Detect smoothed face boxes, optionally returning coordinates without pixels."""
+    if detector is None:
         device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
         detector = face_detection.FaceAlignment(face_detection.LandmarksType._2D,
                                                 flip_input=False, device=device)
@@ -182,10 +183,11 @@ def face_detect(images, args, jaw_correction=False, detector=None):
         try:
             if explicit_box:
                 y1, y2, x1, x2 = normalized_box
-                roi_images = [image[y1:y2, x1:x2] for image in images]
-                for i in tqdm(range(0, len(roi_images), batch_size), desc='FaceDet:'):
-                    batch_predictions = detector.get_detections_for_batch(
-                        np.array(roi_images[i:i + batch_size]))
+                for i in tqdm(range(0, len(images), batch_size), desc='FaceDet:'):
+                    roi_batch = np.array([
+                        image[y1:y2, x1:x2] for image in images[i:i + batch_size]
+                    ])
+                    batch_predictions = detector.get_detections_for_batch(roi_batch)
                     for rect in batch_predictions:
                         if rect is None:
                             predictions.append(None)
@@ -196,7 +198,7 @@ def face_detect(images, args, jaw_correction=False, detector=None):
             else:
                 for i in tqdm(range(0, len(images), batch_size), desc='FaceDet:'):
                     predictions.extend(detector.get_detections_for_batch(
-                        np.array(images[i:i + batch_size])))
+                        np.array(list(images[i:i + batch_size]))))
         except RuntimeError:
             if batch_size == 1:
                 raise RuntimeError(
@@ -244,12 +246,14 @@ def face_detect(images, args, jaw_correction=False, detector=None):
     boxes = np.array(results)
     if not args.nosmooth:
         boxes = get_smoothened_boxes(boxes, T=5)
-    results = [[image[y1: y2, x1:x2], (y1, y2, x1, x2)]
-               for image, (x1, y1, x2, y2) in zip(images, boxes)]
+    coordinates = [(y1, y2, x1, x2) for x1, y1, x2, y2 in boxes]
 
     del detector
     torch.cuda.empty_cache()
-    return results
+    if coords_only:
+        return coordinates
+    return [[image[y1:y2, x1:x2], (y1, y2, x1, x2)]
+            for image, (y1, y2, x1, x2) in zip(images, coordinates)]
 
 
 def _load(checkpoint_path, device):

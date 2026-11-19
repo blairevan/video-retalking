@@ -202,8 +202,8 @@ class Croper:
             img_np_list[_i] = _inp
         return img_np_list, crop, quad
 
-    def crop_bgr_list(self, bgr_list, xsize=512):
-        """与 crop() 几何一致，但从 BGR 全幅直接裁块再转 RGB，避免整段视频再占一份全分辨率 RGB。"""
+    def crop_bgr_list(self, bgr_list, xsize=512, resize_to=None):
+        """保留 crop() 的裁剪几何，可逐帧缩放后再保存 RGB，避免累积全分辨率图像。"""
         n = len(bgr_list)
         if n == 0:
             return [], (0, 0, 0, 0), [0, 0, 0, 0]
@@ -237,6 +237,8 @@ class Croper:
         for _i in range(n):
             _inp = bgr_list[_i][cly:cry, clx:crx]
             _inp = _inp[ly:ry, lx:rx]
+            if resize_to is not None:
+                _inp = cv2.resize(_inp, resize_to)
             out.append(cv2.cvtColor(_inp, cv2.COLOR_BGR2RGB))
         return out, crop, quad
 
