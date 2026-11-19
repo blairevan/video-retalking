@@ -1,3 +1,4 @@
+import cv2
 import PIL
 import PIL.Image
 import dlib
@@ -17,6 +18,29 @@ def paste_image(inverse_transform, img, orig_image):
     projected = img.convert('RGBA').transform(orig_image.size, Image.PERSPECTIVE, inverse_transform, Image.BILINEAR)
     pasted_image.paste(projected, (0, 0), mask=projected)
     return pasted_image
+
+
+def build_face_inputs(frame, crop_box, face_box, inverse_transform, crop, image_size):
+    """Return the resized stabilized reference and original face for one frame."""
+    top, bottom, left, right = crop_box
+    face_top, face_bottom, face_left, face_right = face_box
+    aligned = paste_image(
+        inverse_transform,
+        crop,
+        Image.fromarray(cv2.resize(frame[top:bottom, left:right], (256, 256))),
+    )
+    original_face = cv2.resize(
+        frame[face_top:face_bottom, face_left:face_right], (image_size, image_size)
+    )
+    reference = frame.copy()
+    reference[top:bottom, left:right] = cv2.resize(
+        np.array(aligned.convert("RGB")), (right - left, bottom - top)
+    )
+    reference_face = cv2.resize(
+        reference[face_top:face_bottom, face_left:face_right], (image_size, image_size)
+    )
+    return reference_face, original_face
+
 
 def get_landmark(filepath, predictor, detector=None, fa=None):
     """get landmark with dlib

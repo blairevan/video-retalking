@@ -31,7 +31,8 @@ from third_part.ganimation_replicate.model.ganimation import GANimationModel
 
 from utils import audio
 from utils.ffhq_preprocess import Croper
-from utils.alignment_stit import crop_faces, calc_alignment_coefficients, paste_image
+from utils.frame_io import open_source_frames
+from utils.alignment_stit import build_face_inputs, crop_faces, calc_alignment_coefficients
 from utils.inference_utils import (
     Laplacian_Pyramid_Blending_with_mask,
     face_detect,
@@ -80,7 +81,6 @@ class Predictor(BasePredictor):
         input_audio: Path = Input(description="Input audio file."),
     ) -> Path:
         """Run a single prediction on the model"""
-        device = "cuda"
         args = argparse.Namespace(
             DNet_path="checkpoints/DNet.pt",
             LNet_path="checkpoints/LNet.pth",
@@ -105,48 +105,33 @@ class Predictor(BasePredictor):
             tmp_dir="temp",
             re_preprocess=False,
         )
+        with open_source_frames(args.face, args.crop, args.fps) as (full_frames, fps, is_image):
+            args.static = args.static or is_image
+            return self._run_inference(args, full_frames, fps)
 
+    def _run_inference(self, args, full_frames, fps):
+        """Run lip synthesis against a cache that stays open through composition."""
+        device = "cuda"
+        os.makedirs(os.path.join("temp", args.tmp_dir), exist_ok=True)
         base_name = args.face.split("/")[-1]
 
-        if args.face.split(".")[1] in ["jpg", "png", "jpeg"]:
-            full_frames = [cv2.imread(args.face)]
-            args.static = True
-            fps = args.fps
-        else:
-            video_stream = cv2.VideoCapture(args.face)
-            fps = video_stream.get(cv2.CAP_PROP_FPS)
-            full_frames = []
-            while True:
-                still_reading, frame = video_stream.read()
-                if not still_reading:
-                    video_stream.release()
-                    break
-                y1, y2, x1, x2 = args.crop
-                if x2 == -1:
-                    x2 = frame.shape[1]
-                if y2 == -1:
-                    y2 = frame.shape[0]
-                frame = frame[y1:y2, x1:x2]
-                full_frames.append(frame)
-
-        full_frames_RGB = [
-            cv2.cvtColor(frame, cv2.COLOR_BGR2RGB) for frame in full_frames
-        ]
-        full_frames_RGB, crop, quad = self.croper.crop(full_frames_RGB, xsize=512)
+        landmark_frames, crop, quad = self.croper.crop_bgr_list(
+            full_frames, xsize=512, resize_to=(256, 256)
+        )
 
         clx, cly, crx, cry = crop
         lx, ly, rx, ry = quad
         lx, ly, rx, ry = int(lx), int(ly), int(rx), int(ry)
+        frame_h, frame_w = full_frames[0].shape[:2]
         oy1, oy2, ox1, ox2 = (
             cly + ly,
-            min(cly + ry, full_frames[0].shape[0]),
+            min(cly + ry, frame_h),
             clx + lx,
-            min(clx + rx, full_frames[0].shape[1]),
+            min(clx + rx, frame_w),
         )
         # original_size = (ox2 - ox1, oy2 - oy1)
-        frames_pil = [
-            Image.fromarray(cv2.resize(frame, (256, 256))) for frame in full_frames_RGB
-        ]
+        frames_pil = [Image.fromarray(frame) for frame in landmark_frames]
+        del landmark_frames
 
         # get the landmark according to the detected face.
         if (
@@ -314,7 +299,6 @@ class Predictor(BasePredictor):
             imgs_enhanced.copy(), mel_chunks, full_frames, args, (oy1, oy2, ox1, ox2)
         )
 
-        frame_h, frame_w = full_frames[0].shape[:-1]
         out = cv2.VideoWriter(
             "temp/{}/result.mp4".format(args.tmp_dir),
             cv2.VideoWriter_fourcc(*"mp4v"),
@@ -334,7 +318,7 @@ class Predictor(BasePredictor):
             frames,
             coords,
             img_original,
-            f_frames,
+            frame_indices,
         ) in enumerate(
             tqdm(
                 gen,
@@ -390,10 +374,11 @@ class Predictor(BasePredictor):
             pred = pred.cpu().numpy().transpose(0, 2, 3, 1) * 255.0
 
             torch.cuda.empty_cache()
-            for p, f, xf, c in zip(pred, frames, f_frames, coords):
+            for p, frame_index, c in zip(pred, frame_indices, coords):
                 y1, y2, x1, x2 = c
                 p = cv2.resize(p.astype(np.uint8), (x2 - x1, y2 - y1))
 
+                xf = full_frames[frame_index]
                 ff = xf.copy()
                 ff[y1:y2, x1:x2] = p
 
@@ -438,7 +423,8 @@ class Predictor(BasePredictor):
 
 # frames:256x256, full_frames: original size
 def datagen(frames, mels, full_frames, args, cox):
-    img_batch, mel_batch, frame_batch, coords_batch, ref_batch, full_frame_batch = (
+    """Yield Cog model inputs and source frame indexes for composition."""
+    img_batch, mel_batch, frame_batch, coords_batch, ref_batch, frame_indices = (
         [],
         [],
         [],
@@ -447,7 +433,6 @@ def datagen(frames, mels, full_frames, args, cox):
         [],
     )
     base_name = args.face.split("/")[-1]
-    refs = []
     image_size = 256
 
     # original frames
@@ -471,29 +456,7 @@ def datagen(frames, mels, full_frames, args, cox):
     ]
     del kp_extractor.detector
 
-    oy1, oy2, ox1, ox2 = cox
-    face_det_results = face_detect(full_frames, args, jaw_correction=True)
-
-    for inverse_transform, crop, full_frame, face_det in zip(
-        inverse_transforms, crops, full_frames, face_det_results
-    ):
-        imc_pil = paste_image(
-            inverse_transform,
-            crop,
-            Image.fromarray(
-                cv2.resize(
-                    full_frame[int(oy1) : int(oy2), int(ox1) : int(ox2)], (256, 256)
-                )
-            ),
-        )
-
-        ff = full_frame.copy()
-        ff[int(oy1) : int(oy2), int(ox1) : int(ox2)] = cv2.resize(
-            np.array(imc_pil.convert("RGB")), (ox2 - ox1, oy2 - oy1)
-        )
-        oface, coords = face_det
-        y1, y2, x1, x2 = coords
-        refs.append(ff[y1:y2, x1:x2])
+    face_boxes = face_detect(full_frames, args, jaw_correction=True, coords_only=True)
 
     for i, m in enumerate(mels):
         # Ping-Pong 镜像循环：音频超出视频长度时，帧序列来回运动，避免末帧→首帧硬切跳变
@@ -505,18 +468,17 @@ def datagen(frames, mels, full_frames, args, cox):
             p = i % cycle if cycle > 0 else 0
             idx = p if p < n else cycle - p
         frame_to_save = frames[idx].copy()
-        face = refs[idx]
-        oface, coords = face_det_results[idx].copy()
-
-        face = cv2.resize(face, (args.img_size, args.img_size))
-        oface = cv2.resize(oface, (args.img_size, args.img_size))
+        coords = face_boxes[idx]
+        face, oface = build_face_inputs(
+            full_frames[idx], cox, coords, inverse_transforms[idx], crops[idx], args.img_size
+        )
 
         img_batch.append(oface)
         ref_batch.append(face)
         mel_batch.append(m)
         coords_batch.append(coords)
         frame_batch.append(frame_to_save)
-        full_frame_batch.append(full_frames[idx].copy())
+        frame_indices.append(idx)
 
         if len(img_batch) >= args.LNet_batch_size:
             img_batch, mel_batch, ref_batch = (
@@ -532,14 +494,14 @@ def datagen(frames, mels, full_frames, args, cox):
                 mel_batch, [len(mel_batch), mel_batch.shape[1], mel_batch.shape[2], 1]
             )
 
-            yield img_batch, mel_batch, frame_batch, coords_batch, img_original, full_frame_batch
+            yield img_batch, mel_batch, frame_batch, coords_batch, img_original, frame_indices
             (
                 img_batch,
                 mel_batch,
                 frame_batch,
                 coords_batch,
                 img_original,
-                full_frame_batch,
+                frame_indices,
                 ref_batch,
             ) = ([], [], [], [], [], [], [])
 
@@ -556,4 +518,4 @@ def datagen(frames, mels, full_frames, args, cox):
         mel_batch = np.reshape(
             mel_batch, [len(mel_batch), mel_batch.shape[1], mel_batch.shape[2], 1]
         )
-        yield img_batch, mel_batch, frame_batch, coords_batch, img_original, full_frame_batch
+        yield img_batch, mel_batch, frame_batch, coords_batch, img_original, frame_indices
