@@ -496,7 +496,14 @@ def datagen(frames, mels, full_frames, args, cox):
         refs.append(ff[y1:y2, x1:x2])
 
     for i, m in enumerate(mels):
-        idx = 0 if args.static else i % len(frames)
+        # Ping-Pong 镜像循环：音频超出视频长度时，帧序列来回运动，避免末帧→首帧硬切跳变
+        if args.static:
+            idx = 0
+        else:
+            n = len(frames)
+            cycle = n * 2 - 2
+            p = i % cycle if cycle > 0 else 0
+            idx = p if p < n else cycle - p
         frame_to_save = frames[idx].copy()
         face = refs[idx]
         oface, coords = face_det_results[idx].copy()

@@ -13,3 +13,11 @@ results/*
 temp/*
 segments.txt
 .DS_Store
+
+# Local media inputs and development environment
+/input/
+.env
+.env.*
+!.env.example
+.venv/
+.pytest_cache/

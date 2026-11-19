@@ -14,6 +14,8 @@ from third_part.face3d.models import networks
 import warnings
 warnings.filterwarnings("ignore")
 
+from utils.audio import parse_bool
+
 AUTO_FALLBACK_BOX = (10, 610, 100, 1100)
 
 
@@ -63,6 +65,10 @@ def options():
     parser.add_argument('--tmp_dir', type=str, default='temp',
                         help='Folder to save tmp results')
     parser.add_argument('--re_preprocess', action='store_true')
+    parser.add_argument('--close_mouth_start', type=parse_bool, default=True,
+                        help='Close mouth during leading silence (true/false)')
+    parser.add_argument('--close_mouth_end', type=parse_bool, default=False,
+                        help='Close mouth during trailing silence (true/false)')
 
     args = parser.parse_args()
     return args

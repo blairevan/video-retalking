@@ -1,29 +1,68 @@
-import librosa
-import librosa.filters
+import math
 import numpy as np
 # import tensorflow as tf
-from scipy import signal
-from scipy.io import wavfile
 from .hparams import hparams as hp
 
 def load_wav(path, sr):
+    import librosa
     return librosa.core.load(path, sr=sr)[0]
 
+def parse_bool(value):
+    """Parse a human-readable boolean value for command-line arguments."""
+    normalized = str(value).strip().lower()
+    true_values = {"1", "true", "yes", "on"}
+    false_values = {"0", "false", "no", "off"}
+    if normalized in true_values:
+        return True
+    if normalized in false_values:
+        return False
+    raise ValueError(f"Invalid boolean value: {value}")
+
+def audio_samples_to_frame_range(start_sample, end_sample, sample_rate, fps):
+    """Map an active audio sample range to an inclusive video-frame boundary."""
+    active_start_frame = int(math.floor(start_sample / sample_rate * float(fps)))
+    active_end_frame = int(math.ceil(end_sample / sample_rate * float(fps)))
+    return max(0, active_start_frame), max(active_start_frame, active_end_frame)
+
+def get_active_audio_frame_range(audio_path, fps, top_db=40.0):
+    """Return the video-frame range containing detected active audio."""
+    import librosa
+
+    try:
+        audio, sample_rate = librosa.load(audio_path, sr=16000, mono=True)
+        if audio.size == 0:
+            return 0, 0
+
+        _, trim_indices = librosa.effects.trim(audio, top_db=top_db)
+        active_start_sample = int(trim_indices[0])
+        active_end_sample = int(trim_indices[1])
+        return audio_samples_to_frame_range(
+            active_start_sample,
+            active_end_sample,
+            sample_rate,
+            fps,
+        )
+    except Exception:
+        return 0, 0
 def save_wav(wav, path, sr):
     wav *= 32767 / max(0.01, np.max(np.abs(wav)))
     #proposed by @dsmiller
+    from scipy.io import wavfile
     wavfile.write(path, sr, wav.astype(np.int16))
 
 def save_wavenet_wav(wav, path, sr):
+    import librosa
     librosa.output.write_wav(path, wav, sr=sr)
 
 def preemphasis(wav, k, preemphasize=True):
     if preemphasize:
+        from scipy import signal
         return signal.lfilter([1, -k], [1], wav)
     return wav
 
 def inv_preemphasis(wav, k, inv_preemphasize=True):
     if inv_preemphasize:
+        from scipy import signal
         return signal.lfilter([1], [1, -k], wav)
     return wav
 
@@ -58,6 +97,7 @@ def _stft(y):
     if hp.use_lws:
         return _lws_processor(hp).stft(y).T
     else:
+        import librosa
         return librosa.stft(y=y, n_fft=hp.n_fft, hop_length=get_hop_size(), win_length=hp.win_size)
 
 ##########################################################
@@ -97,6 +137,8 @@ def _linear_to_mel(spectogram):
 
 def _build_mel_basis():
     assert hp.fmax <= hp.sample_rate // 2
+    import librosa
+    import librosa.filters
     return librosa.filters.mel(hp.sample_rate, hp.n_fft, n_mels=hp.num_mels,
                                fmin=hp.fmin, fmax=hp.fmax)
 

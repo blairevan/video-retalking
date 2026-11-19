@@ -293,6 +293,16 @@ def main():
         i += 1
 
     print("[Step 4] Load audio; Length of mel chunks: {}".format(len(mel_chunks)))
+    active_audio_start_frame, active_audio_end_frame = audio.get_active_audio_frame_range(
+        args.audio, fps
+    )
+    active_audio_start_frame = min(active_audio_start_frame, len(mel_chunks))
+    active_audio_end_frame = min(active_audio_end_frame, len(mel_chunks))
+    print(
+        f"[Info] Active audio spans frames {active_audio_start_frame}:"
+        f"{active_audio_end_frame}/{len(mel_chunks)}; "
+        f"close_mouth_start={args.close_mouth_start}, close_mouth_end={args.close_mouth_end}"
+    )
     imgs = imgs[:len(mel_chunks)]
     full_frames = full_frames[:len(mel_chunks)]
     lm = lm[:len(mel_chunks)]
@@ -341,6 +351,7 @@ def main():
         instance.setup()
 
     kp_extractor = KeypointExtractor()
+    global_frame_idx = 0
     for i, (img_batch, mel_batch, frames, coords, img_original, f_frames) in enumerate(tqdm(gen, desc='[Step 6] Lip Synthesis:', total=int(np.ceil(float(len(mel_chunks)) / args.LNet_batch_size)))):
         img_batch = torch.FloatTensor(
             np.transpose(img_batch, (0, 3, 1, 2))).to(device)
@@ -376,6 +387,7 @@ def main():
                 pred = pred * mask + cur_gen_faces * (1 - mask)
 
         pred = pred.cpu().numpy().transpose(0, 2, 3, 1) * 255.
+        orig_faces = (img_original.cpu().numpy().transpose(0, 2, 3, 1) * 255.).astype(np.uint8)
 
         # 清理显存避免长视频累积OOM
         del img_batch, mel_batch, img_original, incomplete, reference, low_res
@@ -383,7 +395,15 @@ def main():
             del cur_gen_faces
         torch.cuda.empty_cache()
 
-        for p, f, xf, c in zip(pred, frames, f_frames, coords):
+        for p, f, xf, c, oface in zip(pred, frames, f_frames, coords, orig_faces):
+            should_close_mouth = (
+                (global_frame_idx < active_audio_start_frame and args.close_mouth_start)
+                or (global_frame_idx >= active_audio_end_frame and args.close_mouth_end)
+            )
+            if should_close_mouth:
+                p = cv2.resize(oface, (args.img_size, args.img_size))
+            global_frame_idx += 1
+
             y1, y2, x1, x2 = c
             p = cv2.resize(p.astype(np.uint8), (x2 - x1, y2 - y1))
 
@@ -679,7 +699,14 @@ def datagen(frames, mels, full_frames, frames_pil, cox):
         return ff[y1: y2, x1:x2]  # 直接返回，不缓存
 
     for i, m in enumerate(mels):
-        idx = 0 if args.static else i % len(frames)
+        # Ping-Pong 镜像循环：音频超出视频长度时，帧序列来回运动，避免末帧→首帧硬切跳变
+        if args.static:
+            idx = 0
+        else:
+            n = len(frames)
+            cycle = n * 2 - 2
+            p = i % cycle if cycle > 0 else 0
+            idx = p if p < n else cycle - p
         frame_to_save = frames[idx].copy()
         face = get_ref(idx)  # 按需获取ref
         oface, coords = face_det_results[idx].copy()
